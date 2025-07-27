@@ -491,19 +491,54 @@ def initialize_q_values(map, target_pos):
                         q_values[r, c, action] = 0
     return q_values
 
-def initialize_network_weights(net, map_array, target_pos):
-    """改进：根据动作类型初始化Q值"""
-    q_values = initialize_q_values(map_array, target_pos)
+def pretrain_network(net, optimizer, map_array, target_pos, epochs=5):
+    """
+    使用启发式Q值对网络进行预训练
+    """
+    print("Starting network pre-training...")
+    q_values_heuristic = initialize_q_values(map_array, target_pos)
+    
+    # 创建教师数据集
+    states = []
+    target_qs = []
     rows, cols = map_array.shape
     for r in range(rows):
         for c in range(cols):
-            state = matrix_to_img((r, c), map_array)
-            if map_array[r, c] == 0:
-                with torch.no_grad():
-                    q_outputs = net(state)
-                    for action in range(4):
-                        q_outputs[0, action] = q_values[r, c, action]
-                    net.fc2.bias.data = q_outputs[0]
+            if map_array[r, c] == 0:  # 只使用可通行格
+                states.append(matrix_to_img((r, c), map_array))
+                target_qs.append(torch.tensor(q_values_heuristic[r, c, :], dtype=torch.float32))
+
+    if not states:
+        print("No valid states for pre-training.")
+        return
+
+    states_tensor = torch.cat(states).to(device)
+    target_qs_tensor = torch.stack(target_qs).to(device)
+    
+    loss_fn = nn.MSELoss()
+    
+    for epoch in range(epochs):
+        # 前向传播
+        predicted_qs = net(states_tensor)
+        
+        # 计算损失
+        loss = loss_fn(predicted_qs, target_qs_tensor)
+        
+        # 反向传播和优化
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch + 1) % 1 == 0:
+            print(f'Pre-train Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.6f}')
+    print("Pre-training finished.")
+
+
+def initialize_network_weights(net, optimizer, map_array, target_pos):
+    """
+    通过预训练来初始化网络权重
+    """
+    pretrain_network(net, optimizer, map_array, target_pos, epochs=10)
 # 共用函数
 def matrix_to_img(pos, map_array):
     row, col = pos
@@ -900,11 +935,11 @@ def optimize_model_v3(policy_net, target_net, optimizer, memory):
 def run_algorithm_v1():
     policy_net = DQN().to(device)
     target_net = DQN().to(device)
-    # 使用预训练值初始化网络
-    initialize_network_weights(policy_net, map, target_pos)
+    optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+    # 使用预训练来初始化网络
+    initialize_network_weights(policy_net, optimizer, map, target_pos)
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
-    optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
     epsilon = 0.5
     eps_decay = 0.99
     min_epsilon = 0.05
